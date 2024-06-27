@@ -1,0 +1,87 @@
+
+# Load required libraries
+library(Seurat)
+library(Signac)
+library(dplyr)
+library(ggplot2)
+library(clusterProfiler)
+
+# Load example scRNA-seq data
+rna_counts <- Read10X(data.dir = "path/to/scrna/seq/data")
+
+# Create a Seurat object
+seurat_rna <- CreateSeuratObject(counts = rna_counts, project = "scRNASeq")
+
+# Normalize data
+seurat_rna <- SCTransform(seurat_rna, verbose = FALSE)
+
+# Load example scATAC-seq data
+atac_counts <- Read10X(data.dir = "path/to/scatac/seq/data")
+
+# Create a Seurat object
+seurat_atac <- CreateSeuratObject(counts = atac_counts, assay = "ATAC", project = "scATACSeq")
+
+# Create chromatin assay
+chrom_assay <- CreateChromatinAssay(counts = atac_counts, sep = c(":", "-"), genome = 'hg19')
+seurat_atac[["ATAC"]] <- chrom_assay
+
+# Run TF-IDF normalization and SVD
+seurat_atac <- RunTFIDF(seurat_atac)
+seurat_atac <- FindTopFeatures(seurat_atac, min.cutoff = 'q0')
+seurat_atac <- RunSVD(seurat_atac)
+
+# Find integration anchors
+anchors <- FindTransferAnchors(
+  reference = seurat_rna,
+  query = seurat_atac,
+  reduction = 'cca',
+  dims = 1:30
+)
+
+# Transfer labels from RNA to ATAC
+predicted_labels <- TransferData(
+  anchorset = anchors,
+  refdata = seurat_rna$celltype,
+  weight.reduction = seurat_atac[['lsi']],
+  dims = 1:30
+)
+
+seurat_atac <- AddMetaData(object = seurat_atac, metadata = predicted_labels)
+
+# Merge the objects
+combined <- merge(x = seurat_rna, y = seurat_atac, add.cell.ids = c("RNA", "ATAC"))
+
+# Quality Control
+seurat_rna <- subset(seurat_rna, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5)
+seurat_atac <- subset(seurat_atac, subset = nFeature_ATAC > 500 & nFeature_ATAC < 10000)
+
+# Run PCA on combined data
+combined <- RunPCA(combined, npcs = 30, verbose = FALSE)
+
+# Find neighbors and clusters
+combined <- FindNeighbors(combined, dims = 1:30)
+combined <- FindClusters(combined, resolution = 0.5)
+
+# UMAP for visualization
+combined <- RunUMAP(combined, dims = 1:30)
+
+# UMAP plot
+DimPlot(combined, reduction = "umap", group.by = "orig.ident")
+
+# Feature plot for gene expression
+FeaturePlot(combined, features = c("GeneX"))
+
+# Chromatin accessibility plot
+CoveragePlot(
+  object = combined,
+  region = "chr1-1-1000000"
+)
+
+# Identify differentially expressed genes
+de_markers <- FindMarkers(combined, ident.1 = 0, ident.2 = 1)
+
+# Pathway analysis using clusterProfiler
+pathway_results <- enrichKEGG(gene = rownames(de_markers), organism = "hsa")
+
+# Visualize pathways
+dotplot(pathway_results)
